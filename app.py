@@ -7,27 +7,49 @@ import io
 import re
 import pandas as pd
 from datetime import datetime
-from thefuzz import fuzz # Free similarity scoring
+from thefuzz import fuzz
 
-# --- CONFIG & UI ---
-st.set_page_config(page_title="Smart-Diff Pro | Zero-Cost", layout="wide")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
 
-# Session State for Batch Reports
-if "batch_results" not in st.session_state:
-    st.session_state.batch_results = []
+# Password & API Keys from Secrets
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123")
+api_key = st.secrets.get("GEMINI_API_KEY")
 
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "batch_log" not in st.session_state:
+    st.session_state.batch_log = []
+
+# --- 2. SIDEBAR: CONTROLS & HISTORY ---
 with st.sidebar:
-    st.header("⚙️ Audit Settings")
-    focus_mode = st.radio("Focus Profile:", ["Strict", "Logic Only", "Summary"])
+    st.header("🔐 Access Control")
+    pwd_input = st.text_input("Enter App Password", type="password")
+    
     st.divider()
-    if st.button("🗑️ Clear Session"):
-        st.session_state.batch_results = []
-        st.rerun()
+    st.header("⚙️ Audit Profile")
+    focus_mode = st.radio(
+        "Select Sensitivity:",
+        ["Strict Audit", "Logic Only", "Summary"],
+        help="Strict: Every char | Logic: Dates/Numbers | Summary: General intent"
+    )
+    
+    st.divider()
+    st.header("📜 Session History")
+    if st.session_state.history:
+        for item in reversed(st.session_state.history):
+            with st.expander(f"{item['time']} - {item['files']}"):
+                st.markdown(item['result'])
+    else:
+        st.caption("No recent audits.")
 
-st.title("🔍 Smart-Diff Pro: Batch Auditor")
-st.caption("Free Enterprise Edition | Zero API Costs beyond Gemini Free Tier")
+# --- 3. LOGIN GATE ---
+if pwd_input != APP_PASSWORD:
+    st.title("🔍 Smart-Diff Pro")
+    st.warning("Locked. Enter password in sidebar.")
+    st.stop()
 
-# --- UTILITIES ---
+# --- 4. CORE UTILITIES ---
 def extract_text(uploaded_file):
     try:
         content = uploaded_file.getvalue()
@@ -38,78 +60,106 @@ def extract_text(uploaded_file):
             doc = Document(io.BytesIO(content))
             text = "\n".join([para.text for para in doc])
         return re.sub(r'\s+', ' ', text).strip()
-    except Exception as e:
+    except Exception:
         return ""
 
-def generate_excel(data_list):
-    output = io.BytesIO()
-    df = pd.DataFrame(data_list)
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Audit_Trail')
-    return output.getvalue()
+def get_system_instruction(mode):
+    base = "You are a Professional Auditor. Compare Original (A) and Revised (B)."
+    if mode == "Strict Audit":
+        return base + " Flag EVERY change including punctuation. Use 🟢[ADD], 🔴[DEL], 🟠[MOD]."
+    elif mode == "Logic Only":
+        return base + " Only flag changes in dates, numbers, part numbers, and 'Yes/No' instructions."
+    return base + " Provide a high-level summary of intent and major changes."
 
-# --- MAIN INTERFACE ---
-col_a, col_b = st.columns(2)
-with col_a:
-    master_file = st.file_uploader("Upload Master (Source)", type=['pdf', 'docx'])
-with col_b:
-    revised_files = st.file_uploader("Upload Revised (Batch)", type=['pdf', 'docx'], accept_multiple_files=True)
-
-if st.button("🚀 Start Batch Audit"):
-    if master_file and revised_files:
-        api_key = st.secrets.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
-        raw_master = extract_text(master_file)[:30000]
-        
-        for rev in revised_files:
-            with st.spinner(f"Processing {rev.name}..."):
-                raw_rev = extract_text(rev)[:30000]
-                
-                # FEATURE 1: Free Similarity Score
-                sim_score = fuzz.token_set_ratio(raw_master, raw_rev)
-                
-                # FEATURE 3: Prompt with Context Anchors
-                prompt = f"""Compare Original vs Revised. 
-                For every change, provide:
-                1. Type (ADD/DEL/MOD)
-                2. The Change
-                3. Context Anchor: (5 words before/after the change to find it easily)
-                
-                ORIGINAL: {raw_master}
-                REVISED: {raw_rev}"""
-                
-                response = client.models.generate_content(
-                    model="gemini-1.5-flash", # Free tier model
-                    contents=prompt
-                )
-                
-                # Save to session data for Excel
-                st.session_state.batch_results.append({
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "File Name": rev.name,
-                    "Similarity Score": f"{sim_score}%",
-                    "Status": "High Risk" if sim_score < 85 else "Low Risk",
-                    "AI Summary": response.text[:500] + "..." # Truncated for Excel
-                })
-                
-                # Display individual report
-                with st.expander(f"📄 {rev.name} (Match: {sim_score}%)"):
-                    st.markdown(response.text)
-        
-        st.success("Batch Complete!")
-    else:
-        st.warning("Please upload files first.")
-
-# FEATURE 2: Excel Export Button
-if st.session_state.batch_results:
-    st.divider()
-    st.subheader("📊 Master Audit Log")
-    st.dataframe(st.session_state.batch_results)
+def run_audit(text_a, text_b, key, mode):
+    client = genai.Client(api_key=key)
+    # Using the 2026 stable model ID you requested
+    model_id = "gemini-3.1-flash-lite-preview" 
     
-    excel_data = generate_excel(st.session_state.batch_results)
+    config = types.GenerateContentConfig(
+        system_instruction=get_system_instruction(mode),
+        temperature=0.0
+    )
+    
+    prompt = f"AUDIT TASK: Compare Original vs Revised. Provide 'Context Anchors' (5 words before/after) for MODs.\n\nORIGINAL:\n{text_a}\n\nREVISED:\n{text_b}"
+    
+    response = client.models.generate_content(model=model_id, contents=prompt, config=config)
+    return response.text
+
+# --- 5. MAIN UI ---
+st.title("🔍 Smart-Diff Pro")
+st.caption("2026 Enterprise Auditor | Batch Processing | Zero-Cost Optimization")
+
+col_orig, col_rev = st.columns(2)
+with col_orig:
+    master_file = st.file_uploader("📂 Upload Master (Source)", type=['pdf', 'docx'])
+with col_rev:
+    rev_files = st.file_uploader("📂 Upload Revised (Batch)", type=['pdf', 'docx'], accept_multiple_files=True)
+
+# Side-by-Side Visualizer Toggle (From Version 1)
+show_raw = st.toggle("👁️ Open Side-by-Side Raw Text Viewer")
+if show_raw and master_file:
+    v_col1, v_col2 = st.columns(2)
+    raw_master = extract_text(master_file)
+    with v_col1:
+        st.caption(f"Master: {master_file.name}")
+        st.text_area("Master Content", raw_master, height=200)
+    with v_col2:
+        if rev_files:
+            sel_rev = st.selectbox("Select File to Compare", [f.name for f in rev_files])
+            curr_rev = next(f for f in rev_files if f.name == sel_rev)
+            st.text_area("Revised Content", extract_text(curr_rev), height=200)
+
+st.divider()
+
+if st.button("🚀 Run Semantic Batch Audit"):
+    if not api_key:
+        st.error("API Key missing in Secrets.")
+    elif master_file and rev_files:
+        text_master = extract_text(master_file)[:35000]
+        
+        for rev in rev_files:
+            with st.status(f"Auditing {rev.name}...", expanded=True) as status:
+                text_rev = extract_text(rev)[:35000]
+                
+                # Similarity Score (Free logic)
+                score = fuzz.token_set_ratio(text_master, text_rev)
+                risk = "Low" if score > 90 else "Medium" if score > 75 else "High"
+                
+                try:
+                    report = run_audit(text_master, text_rev, api_key, focus_mode)
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    
+                    # Store in History & Batch Log
+                    st.session_state.history.append({"time": timestamp, "files": rev.name, "result": report})
+                    st.session_state.batch_log.append({
+                        "File": rev.name, "Match %": f"{score}%", "Risk": risk, "Audit Summary": report[:200] + "..."
+                    })
+                    
+                    st.subheader(f"📋 Report: {rev.name} ({score}% Match)")
+                    st.markdown(report)
+                    st.download_button(f"📥 Download {rev.name} Report", report, file_name=f"audit_{rev.name}.md")
+                    status.update(label=f"Done: {rev.name}", state="complete")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+    else:
+        st.warning("Upload Master and at least one Revised file.")
+
+# --- 6. EXCEL EXPORT (From Version 2) ---
+if st.session_state.batch_log:
+    st.divider()
+    st.subheader("📊 Master Audit Trail")
+    df = pd.DataFrame(st.session_state.batch_log)
+    st.dataframe(df, use_container_width=True)
+    
+    # Export logic
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Audit_Summary')
+    
     st.download_button(
-        label="📥 Download Audit Trail (Excel)",
-        data=excel_data,
-        file_name=f"audit_log_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        "📥 Download Full Audit Log (Excel)",
+        data=output.getvalue(),
+        file_name=f"Master_Audit_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
