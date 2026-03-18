@@ -10,6 +10,7 @@ from datetime import datetime
 # --- 1. CONFIGURATION & SECURITY ---
 st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
 
+# Password Gate
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123") 
 
 if "history" not in st.session_state:
@@ -36,7 +37,7 @@ if pwd_input != APP_PASSWORD:
 
 # --- 3. UNLOCKED AUDIT TOOL ---
 st.title("🔍 Smart-Diff Pro")
-st.caption("2026 Enterprise Auditor | Gemini 3.1 Flash")
+st.caption("2026 Enterprise Auditor | Gemini 3.1 Flash-Lite")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 
@@ -54,16 +55,16 @@ def extract_text(uploaded_file):
         return ""
 
 def run_audit(text_a, text_b, key):
-    # NEW 2026 CLIENT ARCHITECTURE
+    # NEW MARCH 2026 CLIENT ARCHITECTURE
     client = genai.Client(api_key=key)
     
     config = types.GenerateContentConfig(
-        system_instruction="You are a Professional Document Auditor. Compare File A and B. Identify 🟢[ADD], 🔴[DEL], 🟠[MOD], 🔵[MOVE]. Ignore formatting.",
+        system_instruction="You are a Professional Document Auditor. Compare File A and B. Identify 🟢[ADD], 🔴[DEL], 🟠[MOD], 🔵[MOVE]. Ignore formatting. Be technical and precise.",
         temperature=0.0
     )
     
-    # USING THE LATEST MARCH 2026 MODEL ID
-    model_id = "gemini-3.1-flash-preview"
+    # STABLE 2026 MODEL ID
+    model_id = "gemini-3.1-flash-lite-preview"
     
     prompt = f"AUDIT TASK:\n\nORIGINAL (A):\n{text_a}\n\nREVISED (B):\n{text_b}"
     
@@ -85,7 +86,8 @@ if st.button("🚀 Run Semantic Audit"):
     if not api_key:
         st.error("API Key missing in Secrets.")
     elif file_a and file_b:
-        with st.spinner("Analyzing changes via Gemini 3.1..."):
+        with st.spinner("Analyzing changes..."):
+            # Extraction limited to 35k chars for max token precision
             raw_a = extract_text(file_a)[:35000]
             raw_b = extract_text(file_b)[:35000]
             
@@ -104,7 +106,6 @@ if st.button("🚀 Run Semantic Audit"):
                 st.markdown(report)
                 st.download_button("📥 Download (.md)", report, file_name=f"audit_{timestamp}.md")
             except Exception as e:
-                # Direct error printing to catch any API handshake issues
                 st.error(f"Handshake Error: {e}")
     else:
         st.warning("Upload two files first.")
