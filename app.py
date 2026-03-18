@@ -10,7 +10,6 @@ from datetime import datetime
 # --- 1. CONFIGURATION & SECURITY ---
 st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
 
-# Password Gate
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123") 
 
 if "history" not in st.session_state:
@@ -32,12 +31,12 @@ with st.sidebar:
 # --- 2. LOGIN GATE ---
 if pwd_input != APP_PASSWORD:
     st.title("🔍 Smart-Diff Pro")
-    st.warning("Locked. Please enter the App Password in the sidebar to unlock.")
+    st.warning("Locked. Enter the App Password in the sidebar to unlock.")
     st.stop()
 
 # --- 3. UNLOCKED AUDIT TOOL ---
 st.title("🔍 Smart-Diff Pro")
-st.caption("2026 Enterprise Auditor | Gemini 3.1 Flash-Lite")
+st.caption("2026 Enterprise Auditor | Side-by-Side Review Enabled")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 
@@ -55,44 +54,56 @@ def extract_text(uploaded_file):
         return ""
 
 def run_audit(text_a, text_b, key):
-    # NEW MARCH 2026 CLIENT ARCHITECTURE
     client = genai.Client(api_key=key)
-    
     config = types.GenerateContentConfig(
-        system_instruction="You are a Professional Document Auditor. Compare File A and B. Identify 🟢[ADD], 🔴[DEL], 🟠[MOD], 🔵[MOVE]. Ignore formatting. Be technical and precise.",
+        system_instruction="Analyze File A and B. Highlight 🟢[ADD], 🔴[DEL], 🟠[MOD], 🔵[MOVE]. Focus on logic/data changes. Ignore formatting.",
         temperature=0.0
     )
-    
-    # STABLE 2026 MODEL ID
+    # 2026 Stable Model ID
     model_id = "gemini-3.1-flash-lite-preview"
-    
     prompt = f"AUDIT TASK:\n\nORIGINAL (A):\n{text_a}\n\nREVISED (B):\n{text_b}"
     
-    response = client.models.generate_content(
-        model=model_id,
-        contents=prompt,
-        config=config
-    )
+    response = client.models.generate_content(model=model_id, contents=prompt, config=config)
     return response.text
 
-# UI Layout
+# --- UI Layout ---
 col1, col2 = st.columns(2)
 with col1:
-    file_a = st.file_uploader("Upload Original", type=['pdf', 'docx'])
+    file_a = st.file_uploader("Upload Original (A)", type=['pdf', 'docx'])
 with col2:
-    file_b = st.file_uploader("Upload Revised", type=['pdf', 'docx'])
+    file_b = st.file_uploader("Upload Revised (B)", type=['pdf', 'docx'])
 
+# SIDE-BY-SIDE VISUALIZER (Raw Data)
+if file_a or file_b:
+    with st.expander("👀 View Extracted Raw Text (Side-by-Side Review)"):
+        v_col1, v_col2 = st.columns(2)
+        with v_col1:
+            if file_a:
+                raw_a = extract_text(file_a)
+                st.info(f"**Source A ({file_a.name})**")
+                st.text_area("Content A", raw_a, height=250, disabled=True)
+            else:
+                st.write("Waiting for File A...")
+        with v_col2:
+            if file_b:
+                raw_b = extract_text(file_b)
+                st.info(f"**Source B ({file_b.name})**")
+                st.text_area("Content B", raw_b, height=250, disabled=True)
+            else:
+                st.write("Waiting for File B...")
+
+# --- Execution ---
 if st.button("🚀 Run Semantic Audit"):
     if not api_key:
-        st.error("API Key missing in Secrets.")
+        st.error("API Key missing.")
     elif file_a and file_b:
-        with st.spinner("Analyzing changes..."):
-            # Extraction limited to 35k chars for max token precision
-            raw_a = extract_text(file_a)[:35000]
-            raw_b = extract_text(file_b)[:35000]
+        with st.spinner("Comparing semantic logic..."):
+            # Fetch again to ensure the latest uploads are used
+            txt_a = extract_text(file_a)[:35000]
+            txt_b = extract_text(file_b)[:35000]
             
             try:
-                report = run_audit(raw_a, raw_b, api_key)
+                report = run_audit(txt_a, txt_b, api_key)
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 
                 st.session_state.history.append({
@@ -104,8 +115,8 @@ if st.button("🚀 Run Semantic Audit"):
                 st.divider()
                 st.subheader("📋 Audit Report")
                 st.markdown(report)
-                st.download_button("📥 Download (.md)", report, file_name=f"audit_{timestamp}.md")
+                st.download_button("📥 Download Report", report, file_name=f"audit_{timestamp}.md")
             except Exception as e:
                 st.error(f"Handshake Error: {e}")
     else:
-        st.warning("Upload two files first.")
+        st.warning("Please upload both files.")
