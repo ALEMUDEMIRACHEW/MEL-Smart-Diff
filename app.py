@@ -18,7 +18,7 @@ st.markdown("""
     .main { background-color: #f5f7f9; }
     .stStatus { border-radius: 10px; }
     </style>
-    """, unsafe_content_type=True)
+    """, unsafe_allow_html=True)
 
 # Credentials from st.secrets
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123")
