@@ -6,6 +6,7 @@ from docx import Document
 import io
 import re
 from datetime import datetime
+import time # Added for wait logic
 
 # --- 1. MEMORY SETUP ---
 st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
@@ -57,7 +58,7 @@ def get_text(uploaded_file):
 
 # --- 4. UI ---
 st.title("🔍 Smart-Diff Pro")
-st.caption("2026 Enterprise Auditor | Auto-Fallback Enabled")
+st.caption("2026 Enterprise Auditor | Auto-Retry Enabled")
 
 api_key = st.secrets.get("GEMINI_API_KEY")
 
@@ -70,24 +71,30 @@ with col2:
     if file_b: st.session_state.content_b = get_text(file_b)
 
 if st.session_state.content_a or st.session_state.content_b:
-    with st.expander("👀 Verify Extracted Content"):
+    with st.expander("👀 Verify Extracted Content", expanded=True):
         v1, v2 = st.columns(2)
         v1.text_area("A", st.session_state.content_a, height=200, disabled=True)
         v2.text_area("B", st.session_state.content_b, height=200, disabled=True)
 
-# --- 5. THE AUTO-FALLBACK AUDIT ---
+# --- 5. THE AUTO-RETRY AUDIT ---
 if st.button("🚀 Run Semantic Audit"):
     if not api_key:
         st.error("Missing API Key.")
     elif st.session_state.content_a and st.session_state.content_b:
-        with st.spinner("Searching for available model..."):
-            client = genai.Client(api_key=api_key)
-            # We try these in order of stability
-            models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        status_box = st.empty()
+        client = genai.Client(api_key=api_key)
+        
+        # We try these in order
+        models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        success = False
+        
+        for model_id in models_to_try:
+            if success: break
             
-            success = False
-            for model_id in models_to_try:
+            # Auto-Retry Loop (3 attempts per model)
+            for attempt in range(3):
                 try:
+                    status_box.info(f"Connecting to {model_id} (Attempt {attempt+1}/3)...")
                     response = client.models.generate_content(
                         model=model_id,
                         contents=f"Compare A and B. Mark 🟢[ADD], 🔴[DEL], 🟠[MOD].\n\nA: {st.session_state.content_a[:30000]}\n\nB: {st.session_state.content_b[:30000]}",
@@ -96,18 +103,22 @@ if st.button("🚀 Run Semantic Audit"):
                     report = response.text
                     timestamp = datetime.now().strftime("%H:%M:%S")
                     st.session_state.history.append({"time": timestamp, "files": f"{file_a.name} vs {file_b.name}", "result": report})
+                    status_box.success(f"Audit Complete using {model_id}")
                     st.divider()
                     st.markdown(report)
                     success = True
-                    break # Stop if it works!
+                    break 
                 except Exception as e:
                     err = str(e)
-                    if "429" in err:
-                        st.error("🚦 Rate Limit Reached. Wait 60 seconds.")
-                        break
-                    continue # Try next model if it's a 404
-            
-            if not success:
-                st.error("❌ All models failed. Please check your API key status in Google AI Studio.")
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                        wait_time = (attempt + 1) * 10
+                        status_box.warning(f"Rate limited. Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                    else:
+                        status_box.error(f"{model_id} failed: {err}")
+                        break # Try the next model
+        
+        if not success:
+            st.error("❌ Critical: All model attempts failed. Please wait 2 minutes for the API quota to reset.")
     else:
         st.warning("Upload both files first.")
