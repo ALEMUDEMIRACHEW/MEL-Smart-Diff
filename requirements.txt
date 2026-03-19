@@ -6,3 +6,4 @@ pandas
 xlsxwriter
 thefuzz
 redlines
+python-Levenshtein
