@@ -14,7 +14,6 @@ from redlines import Redlines
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
 
-# Enterprise styling with Redline & Safety Guard support
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
@@ -25,175 +24,166 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+api_key = st.secrets.get("GEMINI_API_KEY", "YOUR_KEY_HERE")
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123")
-api_key = st.secrets.get("GEMINI_API_KEY")
 
 if "history" not in st.session_state: st.session_state.history = []
 if "batch_log" not in st.session_state: st.session_state.batch_log = []
 
-# --- 2. SIDEBAR CONTROLS ---
+# --- 2. CORE UTILITIES ---
+def open_local_file(path):
+    try:
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            st.error(f"Path no longer valid: {path}")
+    except Exception as e:
+        st.error(f"System error opening file: {e}")
+
+def extract_text(source):
+    try:
+        if isinstance(source, str): # Path string
+            if source.lower().endswith('.pdf'):
+                doc = fitz.open(source)
+                return "\n".join([p.get_text() for p in doc])
+            elif source.lower().endswith('.docx'):
+                doc = Document(source)
+                return "\n".join([p.text for p in doc.paragraphs])
+        else: # UploadedFile object
+            content = source.getvalue()
+            if source.name.lower().endswith('.pdf'):
+                doc = fitz.open(stream=content, filetype="pdf")
+                return "\n".join([p.get_text() for p in doc])
+            elif source.name.lower().endswith('.docx'):
+                doc = Document(io.BytesIO(content))
+                return "\n".join([p.text for p in doc.paragraphs])
+        return ""
+    except: return ""
+
+def run_audit(text_a, text_b, key, mode):
+    client = genai.Client(api_key=key)
+    config = types.GenerateContentConfig(
+        system_instruction=f"Aviation Auditor: {mode}. Flag 🟢[ADD], 🔴[DEL], 🟠[MOD]. Use 5-word anchors.",
+        temperature=0.0
+    )
+    prompt = f"ORIGINAL:\n{text_a}\n\nREVISED:\n{text_b}"
+    return client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=prompt, config=config).text
+
+# --- 3. SIDEBAR ---
 with st.sidebar:
     st.header("🔐 Access Control")
-    pwd_input = st.text_input("Enter App Password", type="password")
-    
+    pwd_input = st.text_input("Password", type="password")
     st.divider()
     st.header("⚙️ Audit Profile")
-    focus_mode = st.radio("Sensitivity Level:", ["Strict Audit", "Logic Only", "Summary"])
-    
-    st.divider()
-    st.header("🚨 Keyword Watchlist")
-    keywords = st.text_input("Alert on (comma separated):", "Caution, Warning, Note, Limit, Torque, Task")
+    focus_mode = st.radio("Sensitivity:", ["Strict Audit", "Logic Only", "Summary"])
+    st.header("🚨 Keywords")
+    keywords = st.text_input("Watchlist:", "Caution, Warning, Note, Limit, Torque")
     keyword_list = [k.strip().lower() for k in keywords.split(",")]
-
-    st.divider()
-    st.header("📜 Session History")
-    if st.session_state.history:
-        for item in reversed(st.session_state.history[-5:]):
-            with st.expander(f"{item['time']} - {item['files']}"):
-                st.markdown(item['result'])
-    
-    if st.button("🗑️ Reset All Results"):
+    if st.button("🗑️ Reset All Data"):
         st.session_state.batch_log = []
         st.session_state.history = []
         st.rerun()
 
 if pwd_input != APP_PASSWORD:
     st.title("🔍 Smart-Diff Pro")
-    st.warning("Locked. Please enter the App Password in the sidebar.")
+    st.warning("Please enter the App Password in the sidebar to unlock.")
     st.stop()
-
-# --- 3. CORE UTILITIES ---
-def extract_text(uploaded_file):
-    try:
-        if isinstance(uploaded_file, str): # Local Path Logic
-            if uploaded_file.endswith('.pdf'):
-                doc = fitz.open(uploaded_file)
-                text = "\n".join([page.get_text() for page in doc])
-            else:
-                doc = Document(uploaded_file)
-                text = "\n".join([para.text for para in doc])
-        else: # Uploaded File Logic
-            content = uploaded_file.getvalue()
-            if uploaded_file.name.endswith('.pdf'):
-                doc = fitz.open(stream=content, filetype="pdf")
-                text = "\n".join([page.get_text() for page in doc])
-            else:
-                doc = Document(io.BytesIO(content))
-                text = "\n".join([para.text for para in doc])
-        return re.sub(r'\s+', ' ', text).strip()
-    except Exception: return ""
-
-def run_audit(text_a, text_b, key, mode):
-    client = genai.Client(api_key=key)
-    model_id = "gemini-3.1-flash-lite-preview" 
-    config = types.GenerateContentConfig(
-        system_instruction=f"Aviation Auditor Mode: {mode}. Flag 🟢[ADD], 🔴[DEL], 🟠[MOD]. Use 5-word anchors.",
-        temperature=0.0
-    )
-    prompt = f"ORIGINAL:\n{text_a}\n\nREVISED:\n{text_b}"
-    return client.models.generate_content(model=model_id, contents=prompt, config=config).text
 
 # --- 4. MAIN INTERFACE ---
 st.title("🔍 Smart-Diff Pro")
-st.caption("Fleet-Master 2026 | Safety Guard | Multi-Mode Auditor")
+st.caption("Fleet-Master 2026 | Safety Guard | Omni-Source Processing")
 
-tab_man, tab_loc = st.tabs(["📤 Manual Batch Upload", "📂 Local Folder Watcher"])
+st.subheader("1. Master Document (Source of Truth)")
+master_file = st.file_uploader("Upload Master File", type=['pdf', 'docx'])
+
+st.subheader("2. Revised Documents (Batch Analysis)")
+tab_man, tab_loc = st.tabs(["📤 Manual Upload", "📂 Local Folder Watcher"])
+
+all_files_queue = [] # This is the "Omni-Source" Collector
 
 with tab_man:
-    m_col1, m_col2 = st.columns(2)
-    with m_col1: master_file = st.file_uploader("📂 Master File (Source)", type=['pdf', 'docx'], key="manual_m")
-    with m_col2: rev_files = st.file_uploader("📂 Revised Files (Batch)", type=['pdf', 'docx'], accept_multiple_files=True, key="manual_r")
+    rev_manual = st.file_uploader("Select files to upload", type=['pdf', 'docx'], accept_multiple_files=True)
+    if rev_manual: all_files_queue.extend(rev_manual)
 
 with tab_loc:
-    st.info("⚠️ Only works if running Streamlit locally on your PC. Cloud apps cannot see your C: drive.")
-    local_path = st.text_input("Enter Local Folder Path (e.g. C:\\Updates):", "")
-    if local_path and not os.path.exists(local_path):
-        st.error("Directory not found. Use 'Manual Batch' if on the web.")
+    local_path = st.text_input("Paste Local Folder Path (Press Enter):", key="loc_input")
+    if local_path:
+        clean_p = os.path.normpath(local_path.strip().strip('"'))
+        if os.path.exists(clean_p) and os.path.isdir(clean_p):
+            local_found = [os.path.join(clean_p, f) for f in os.listdir(clean_p) if f.lower().endswith(('.pdf', '.docx'))]
+            if local_found:
+                st.success(f"✅ Found {len(local_found)} local files.")
+                all_files_queue.extend(local_found)
+            else: st.warning("No valid files in this folder.")
+        else: st.error("❌ Path not found.")
 
-# RESTORED: Side-by-Side Raw Text Visualizer
-show_raw = st.toggle("👁️ Show Side-by-Side Raw Text Viewer")
-if show_raw and master_file:
-    v_col1, v_col2 = st.columns(2)
-    raw_master = extract_text(master_file)
-    with v_col1:
-        st.info(f"Master: {master_file.name}")
-        st.text_area("Master Source Text", raw_master, height=250)
-    with v_col2:
-        preview_list = rev_files if rev_files else []
-        if preview_list:
-            sel_rev = st.selectbox("Compare With:", [f.name for f in preview_list])
-            curr_f = next(f for f in preview_list if f.name == sel_rev)
-            st.text_area(f"Revised: {sel_rev}", extract_text(curr_f), height=250)
-        else:
-            st.warning("Upload files to enable preview.")
+# Previewer
+if master_file and all_files_queue:
+    show_raw = st.toggle("👁️ Preview & Open Files Before Audit")
+    if show_raw:
+        v1, v2 = st.columns(2)
+        v1.text_area("Master Source", extract_text(master_file), height=250)
+        
+        # Friendly names for the dropdown
+        names = [f.name if hasattr(f, 'name') else os.path.basename(f) for f in all_files_queue]
+        sel = v2.selectbox("Choose File to Preview:", names)
+        idx = names.index(sel)
+        target = all_files_queue[idx]
+        
+        v2.text_area(f"Preview: {sel}", extract_text(target), height=250)
+        if isinstance(target, str):
+            if v2.button(f"📂 Open '{sel}' on PC"):
+                open_local_file(target)
 
 st.divider()
 
-# --- 5. EXECUTION ENGINE ---
+# --- 5. EXECUTION ---
 if st.button("🚀 Run Full Safety Audit"):
-    to_process = []
-    if rev_files: to_process = rev_files
-    elif local_path and os.path.exists(local_path):
-        to_process = [os.path.join(local_path, f) for f in os.listdir(local_path) if f.lower().endswith(('.pdf', '.docx'))]
-
-    if not api_key:
-        st.error("API Key missing.")
-    elif master_file and to_process:
+    if master_file and all_files_queue:
         text_master = extract_text(master_file)[:35000]
-        prog_bar = st.progress(0)
-        prog_status = st.empty()
+        prog = st.progress(0)
         
-        for idx, file in enumerate(to_process):
+        for i, file in enumerate(all_files_queue):
             fname = file.name if hasattr(file, 'name') else os.path.basename(file)
-            prog_status.info(f"Auditing {idx+1}/{len(to_process)}: **{fname}**")
-            prog_bar.progress(int(((idx + 1) / len(to_process)) * 100))
+            prog.progress(int(((i+1)/len(all_files_queue))*100))
             
-            with st.status(f"Processing {fname}...", expanded=False) as status:
+            with st.status(f"Auditing {fname}..."):
                 text_rev = extract_text(file)[:35000]
-                
-                # Visual Redline & Similarity
-                redline_html = Redlines(text_master, text_rev).output_markdown
+                report = run_audit(text_master, text_rev, api_key, focus_mode)
+                red_html = Redlines(text_master, text_rev).output_markdown
                 score = fuzz.token_set_ratio(text_master, text_rev)
                 
-                try:
-                    report = run_audit(text_master, text_rev, api_key, focus_mode)
-                    
-                    # Safety Analysis (Numerical & Keyword Alerts)
-                    has_nums = any(char.isdigit() for char in report)
-                    alerts = [k.upper() for k in keyword_list if k in report.lower()]
-                    risk = "🚨 CRITICAL" if has_nums and alerts else "🚨 HIGH" if has_nums else "🟡 MEDIUM" if score < 95 else "🟢 LOW"
-                    
-                    st.session_state.history.append({"time": datetime.now().strftime("%H:%M"), "files": fname, "result": report})
-                    st.session_state.batch_log.append({
-                        "File": fname, "Match %": f"{score}%", "Risk": risk, "Alerts": ", ".join(alerts) if alerts else "None", "Summary": report[:250] + "..."
-                    })
-                    
-                    st.subheader(f"📄 Result: {fname}")
-                    if alerts: st.markdown(f'<div class="keyword-alert">⚠️ Keywords Found: {", ".join(alerts)}</div>', unsafe_allow_html=True)
-                    
-                    t1, t2 = st.tabs(["📊 AI Audit Report", "🎨 Visual Redline"])
-                    with t1: st.markdown(report)
-                    with t2: st.markdown(redline_html, unsafe_allow_html=True)
-                    
-                    status.update(label=f"Done: {fname}", state="complete")
-                except Exception as e:
-                    st.error(f"Error on {fname}: {e}")
-        prog_status.success("✅ Batch Audit Complete!")
-    else:
-        st.warning("Ensure Master and Revised files are provided.")
+                # Risk Logic
+                has_num = any(c.isdigit() for c in report)
+                alerts = [k.upper() for k in keyword_list if k in report.lower()]
+                risk = "🚨 CRITICAL" if (has_num and alerts) else "🚨 HIGH" if has_num else "🟢 LOW"
+                
+                st.session_state.batch_log.append({"File": fname, "Match %": f"{score}%", "Risk": risk, "Alerts": ", ".join(alerts)})
+                st.session_state.history.append({"time": datetime.now().strftime("%H:%M"), "files": fname, "result": report})
 
-# --- 6. DATA DASHBOARD & EXCEL ---
+                st.subheader(f"📄 Result: {fname}")
+                if isinstance(file, str):
+                    if st.button(f"Open File: {fname}", key=f"btn_{i}"):
+                        open_local_file(file)
+                
+                if alerts: st.markdown(f'<div class="keyword-alert">⚠️ Keywords: {", ".join(alerts)}</div>', unsafe_allow_html=True)
+                
+                r1, r2 = st.tabs(["📊 AI Audit Report", "🎨 Visual Redline"])
+                with r1: st.markdown(report)
+                with r2: st.markdown(red_html, unsafe_allow_html=True)
+    else: st.warning("Ensure Master file and at least one Revised source (Upload or Local) is provided.")
+
+# --- 6. DASHBOARD ---
 if st.session_state.batch_log:
     st.divider()
     df = pd.DataFrame(st.session_state.batch_log)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Batch Size", len(df))
-    c2.metric("Critical Alerts (🚨)", len(df[df['Risk'].str.contains("🚨")]))
+    c1.metric("Total Batch", len(df))
+    c2.metric("Critical Alerts", len(df[df['Risk'].str.contains("🚨")]))
     c3.metric("Avg Match %", f"{int(df['Match %'].str.replace('%','').astype(int).mean())}%")
-    
     st.dataframe(df, use_container_width=True)
     
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Safety_Audit')
-    st.download_button("📥 Export Audit Log to Excel", data=output.getvalue(), file_name=f"Audit_Report_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False)
+    st.download_button("📥 Export Results to Excel", out.getvalue(), "Audit_Report.xlsx")
