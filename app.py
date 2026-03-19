@@ -1,6 +1,7 @@
 import streamlit as st
 from google import genai
 from google.genai import types
+import time
 import fitz  # PyMuPDF
 from docx import Document
 import io
@@ -14,12 +15,12 @@ from redlines import Redlines
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Smart-Diff Pro", layout="wide", page_icon="🔍")
 
-# API Setup from Streamlit Cloud Secrets
+# API & Security
 api_key = st.secrets.get("GEMINI_API_KEY")
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123")
 
 if not api_key:
-    st.error("❌ API Key missing in Secrets. Please add 'GEMINI_API_KEY'.")
+    st.error("❌ API Key missing! Add 'GEMINI_API_KEY' to Streamlit Secrets.")
     st.stop()
 
 if "history" not in st.session_state: st.session_state.history = []
@@ -27,22 +28,49 @@ if "batch_log" not in st.session_state: st.session_state.batch_log = []
 
 # --- 2. CORE UTILITIES ---
 
+def run_audit(text_a, text_b, key, mode, max_retries=3):
+    """
+    Targets Gemini 3.1 Flash with built-in retry logic 
+    to handle 'Resource Exhausted' or connection glitches.
+    """
+    client = genai.Client(api_key=key)
+    config = types.GenerateContentConfig(
+        system_instruction=f"Aviation Maintenance Auditor: {mode}. Flag 🟢[ADD], 🔴[DEL], 🟠[MOD]. Use 5-word anchors.",
+        temperature=0.0
+    )
+    prompt = f"ORIGINAL:\n{text_a}\n\nREVISED:\n{text_b}"
+
+    for attempt in range(max_retries):
+        try:
+            # FIXED: Explicitly using the 3.1 Flash Lite Preview string
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview", 
+                contents=prompt, 
+                config=config
+            )
+            return response.text
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "resource_exhausted" in err_str:
+                wait_time = (attempt + 1) * 20 
+                st.warning(f"⚠️ Quota hit. Waiting {wait_time}s to retry {file_name_placeholder}...")
+                time.sleep(wait_time)
+            else:
+                return f"❌ Audit Error: {str(e)}"
+    
+    return "❌ Max retries reached. Quota is fully exhausted for now."
+
 def archive_file(source_path):
-    """Moves audited files to a sub-folder."""
     try:
         folder = os.path.dirname(source_path)
         archive_dir = os.path.join(folder, "Audited_Results")
-        if not os.path.exists(archive_dir):
-            os.makedirs(archive_dir)
+        if not os.path.exists(archive_dir): os.makedirs(archive_dir)
         dest_path = os.path.join(archive_dir, os.path.basename(source_path))
         shutil.move(source_path, dest_path)
         return True
-    except Exception as e:
-        st.error(f"Archive failed: {e}")
-        return False
+    except: return False
 
 def extract_text(source):
-    """Universal Text Extraction (PDF/DOCX)."""
     try:
         if isinstance(source, str):
             if source.lower().endswith('.pdf'):
@@ -62,71 +90,28 @@ def extract_text(source):
         return ""
     except: return "Extraction Error"
 
-def run_audit(text_a, text_b, key, mode):
-    """
-    Standard Gemini Call. 
-    Using 'gemini-2.0-flash' for maximum stability on Streamlit Cloud.
-    """
-    client = genai.Client(api_key=key)
-    
-    config = types.GenerateContentConfig(
-        system_instruction=f"Aviation Maintenance Auditor: {mode}. Flag 🟢[ADD], 🔴[DEL], 🟠[MOD]. Use 5-word anchors.",
-        temperature=0.0
-    )
-    
-    prompt = f"ORIGINAL:\n{text_a}\n\nREVISED:\n{text_b}"
-    
-    # Using the most stable high-performance model to avoid ClientError
-    return client.models.generate_content(
-        model="gemini-2.0-flash", 
-        contents=prompt, 
-        config=config
-    ).text
-
-# --- 3. UI LAYOUT ---
+# --- 3. UI ---
 st.title("🔍 Smart-Diff Pro")
-st.caption("Fleet-Master 2026 | Optimized for Ethiopian MRO")
+st.caption("Fleet-Master 2026 | Powered by Gemini 3.1 Flash")
 
 with st.sidebar:
     st.header("🔐 Access Control")
     pwd_input = st.text_input("Password", type="password")
+    focus_mode = st.radio("Focus:", ["Strict Audit", "Logic Only", "Summary"])
     st.divider()
-    st.header("⚙️ Audit Profile")
-    focus_mode = st.radio("Sensitivity:", ["Strict Audit", "Logic Only", "Summary"])
-    keywords = st.text_input("Watchlist:", "Caution, Warning, Note, Limit, Torque")
-    keyword_list = [k.strip().lower() for k in keywords.split(",")]
-    
-    st.divider()
-    st.header("📜 History")
-    for item in reversed(st.session_state.history[-5:]):
-        st.caption(f"{item['time']} - {item['files']}")
+    if st.button("🗑️ Clear Logs"):
+        st.session_state.batch_log = []
+        st.rerun()
 
 if pwd_input != APP_PASSWORD:
-    st.warning("Please enter your password to continue.")
+    st.warning("Please enter password.")
     st.stop()
 
-# --- 4. DATA SOURCES ---
-# SECTION 1: MASTER
-st.subheader("1. Master Source (Source of Truth)")
-m_t1, m_t2 = st.tabs(["📤 Upload", "📂 Local Folder"])
-master_to_use = None
+# --- 4. SOURCES ---
+st.subheader("1. Master Source")
+m_up = st.file_uploader("Upload Master", type=['pdf', 'docx'])
 
-with m_t1:
-    m_up = st.file_uploader("Upload Master", type=['pdf', 'docx'])
-    if m_up: master_to_use = m_up
-
-with m_t2:
-    m_path = st.text_input("Master Path (C:\\...):", key="master_path_input")
-    if m_path:
-        clean_m = os.path.normpath(m_path.strip().strip('"'))
-        if os.path.exists(clean_m):
-            m_files = [os.path.join(clean_m, f) for f in os.listdir(clean_m) if f.lower().endswith(('.pdf', '.docx'))]
-            if m_files:
-                m_sel = st.selectbox("Select Master:", [os.path.basename(f) for f in m_files])
-                master_to_use = next(f for f in m_files if os.path.basename(f) == m_sel)
-
-# SECTION 2: REVISED
-st.subheader("2. Revised Documents (Batch Analysis)")
+st.subheader("2. Revised Documents (Batch)")
 r_t1, r_t2 = st.tabs(["📤 Upload Batch", "📂 Local Folder"])
 rev_queue = []
 
@@ -135,20 +120,20 @@ with r_t1:
     if r_up: rev_queue.extend(r_up)
 
 with r_t2:
-    r_path = st.text_input("Revised Path (C:\\...):", key="rev_path_input")
+    r_path = st.text_input("Local Folder Path (C:\\...):")
     if r_path:
         clean_r = os.path.normpath(r_path.strip().strip('"'))
         if os.path.exists(clean_r):
             r_found = [os.path.join(clean_r, f) for f in os.listdir(clean_r) if f.lower().endswith(('.pdf', '.docx'))]
             if r_found:
                 r_choices = [os.path.basename(f) for f in r_found]
-                selected_r = st.multiselect("Select Files for Audit:", r_choices, default=r_choices)
-                rev_queue.extend([f for f in r_found if os.path.basename(f) in selected_r])
+                sel_r = st.multiselect("Select Files:", r_choices, default=r_choices)
+                rev_queue.extend([f for f in r_found if os.path.basename(f) in sel_r])
 
 # --- 5. EXECUTION ---
-if st.button("🚀 Run Full Safety Audit"):
-    if master_to_use and rev_queue:
-        t_master = extract_text(master_to_use)[:35000]
+if st.button("🚀 Run 3.1 Safety Audit"):
+    if m_up and rev_queue:
+        t_master = extract_text(m_up)[:35000]
         prog = st.progress(0)
         
         for i, file in enumerate(rev_queue):
@@ -157,30 +142,36 @@ if st.button("🚀 Run Full Safety Audit"):
             
             with st.status(f"Auditing {fname}..."):
                 t_rev = extract_text(file)[:35000]
+                # Global name for retry warning
+                global file_name_placeholder
+                file_name_placeholder = fname
+                
                 report = run_audit(t_master, t_rev, api_key, focus_mode)
                 red_html = Redlines(t_master, t_rev).output_markdown
                 score = fuzz.token_set_ratio(t_master, t_rev)
                 
-                # Safety Guard Features Intact
+                # Safety Guard Features
                 has_num = any(c.isdigit() for c in report)
-                alerts = [k.upper() for k in keyword_list if k in report.lower()]
-                risk = "🚨 CRITICAL" if (has_num and alerts) else "🚨 HIGH" if has_num else "🟢 LOW"
+                risk = "🚨 HIGH" if has_num else "🟢 LOW"
                 
-                st.session_state.batch_log.append({"File": fname, "Match %": f"{score}%", "Risk": risk, "Alerts": ", ".join(alerts)})
+                st.session_state.batch_log.append({"File": fname, "Match %": f"{score}%", "Risk": risk})
                 st.session_state.history.append({"time": datetime.now().strftime("%H:%M"), "files": fname, "result": report})
 
                 st.subheader(f"📄 Result: {fname}")
                 if isinstance(file, str):
-                    if st.button(f"📦 Archive {fname}", key=f"arch_{i}"):
-                        if archive_file(file): st.success("Moved to Audited_Results")
+                    if st.button(f"📦 Archive {fname}", key=f"arc_{i}"):
+                        if archive_file(file): st.success("Archived")
                 
-                res_t1, res_t2 = st.tabs(["📊 Audit Report", "🎨 Visual Redline"])
-                with res_t1: st.markdown(report)
-                with res_t2: st.markdown(red_html, unsafe_allow_html=True)
+                t1, t2 = st.tabs(["📊 Audit", "🎨 Visual"])
+                with t1: st.markdown(report)
+                with t2: st.markdown(red_html, unsafe_allow_html=True)
+                
+                # Small wait to stay within Free Tier RPM
+                time.sleep(3) 
     else:
-        st.warning("Please ensure both Master and Revised sources are set.")
+        st.error("Upload Master and select Revised documents first.")
 
-# --- 6. EXPORT ---
+# --- 6. EXCEL LOG ---
 if st.session_state.batch_log:
     st.divider()
     df = pd.DataFrame(st.session_state.batch_log)
@@ -188,4 +179,4 @@ if st.session_state.batch_log:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
-    st.download_button("📥 Export Results to Excel", out.getvalue(), "Audit_Report.xlsx")
+    st.download_button("📥 Export Results", out.getvalue(), "AuditLog.xlsx")
